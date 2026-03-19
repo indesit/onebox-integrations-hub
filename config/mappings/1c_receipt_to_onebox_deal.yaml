@@ -1,0 +1,64 @@
+version: 1
+name: 1c_receipt_to_onebox_deal
+description: Map 1C receipt webhook payload to OneBox order/set payload.
+
+fields:
+  - target: externalid
+    op: copy
+    from: payload.receipt_id
+
+  - target: name
+    op: template
+    template: "Чек {{ payload.receipt_id }} ({{ payload.store.name }})"
+
+  - target: client
+    op: template
+    template: >
+      {
+        "phones": ["{{ payload.customer.phone }}"],
+        "namelast": "{{ payload.customer.last_name }}",
+        "name": "{{ payload.customer.first_name }}",
+        "findbyArray": ["phone"]
+      }
+
+  - target: sum
+    op: copy
+    from: payload.payment.sum
+
+  - target: currencyid
+    op: const
+    value: 1  # UAH
+
+  - target: workflowid
+    op: const
+    value: 9  # Продаж
+
+  - target: statusid
+    op: const
+    value: 75 # Провести
+
+  - target: customfields
+    op: template
+    template: >
+      {
+        "Magazindovdnik": "{{ payload.store.name }}",
+        "UF_CRM_1526724731": "{{ payload.store.name }}",
+        "DostavkaNP": "Самовывоз",
+        "Sumaperedoplati": "{{ payload.payment.sum }}"
+      }
+
+  - target: products
+    op: template
+    template: >
+      [
+        {% for item in payload["items"] %}
+        {
+          "productinfo": {
+            "sku": "{{ item.sku }}",
+            "name": "{{ item.name }}"
+          },
+          "count": {{ item.quantity }},
+          "price": {{ item.price }}
+        }{% if not loop.last %},{% endif %}
+        {% endfor %}
+      ]

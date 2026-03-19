@@ -1,0 +1,19 @@
+version: 1
+name: onebox_deal_to_telegram
+description: Map OneBox deal webhook payload to Telegram send_message payload.
+
+fields:
+  - target: chat_id
+    op: copy
+    from: payload.telegram_chat_id
+
+  - target: text
+    op: template
+    template: >
+      Deal #{{ payload.deal_id }} ({{ payload.title or "Untitled" }})
+      event={{ event_type }}
+      status={{ payload.status or "unknown" }}
+
+  - target: parse_mode
+    op: const
+    value: HTML

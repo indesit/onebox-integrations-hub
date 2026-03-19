@@ -1,0 +1,35 @@
+# Routing rules for Event Dispatcher (CORE-002)
+# Format: match {source + event_type} → dispatch to adapters
+
+rules:
+  - match:
+      source: "onebox"
+      event_type: "deal_created"
+    adapters:
+      - name: "telegram"
+        action: "send_message"
+        mapping: "onebox_deal_to_telegram"
+
+  - match:
+      source: "onebox"
+      event_type: "deal_updated"
+    adapters:
+      - name: "telegram"
+        action: "send_message"
+        mapping: "onebox_deal_to_telegram"
+
+  - match:
+      source: "onebox"
+      event_type: "deal_status_changed"
+    adapters:
+      - name: "telegram"
+        action: "send_message"
+        mapping: "onebox_deal_to_telegram"
+
+  - match:
+      source: "1c"
+      event_type: "receipt_created"
+    adapters:
+      - name: "onebox"
+        action: "create_order"
+        mapping: "1c_receipt_to_onebox_deal"
