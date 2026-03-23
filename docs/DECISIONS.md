@@ -137,3 +137,40 @@
 ## ADR-031: Periodic jobs реєструються при старті воркера (RQ 2.x)
 **Рішення:** `docker-compose.yml` команда воркера: `sh -c "python -m src.scheduler.periodic && rq worker --with-scheduler default"`. `periodic.py` переписано під RQ 2.x API (`queue.enqueue_at` + `Repeat(times=99999, interval=N)`).
 **Обґрунтування:** RQ 2.x не має `rq.Scheduler` (старий API). Jobs зберігаються в Redis — при флаші Redis або рестарті воркера зникають. Автоматична реєстрація при старті вирішує проблему "воркер живий але нічого не робить".
+
+## ADR-032: Вимкнення Redis BGSAVE для стабільності RQ worker
+
+**Проблема (виявлено 2026-03-23):**
+RQ worker регулярно падав з помилкою:
+```
+redis.exceptions.ResponseError: UNBLOCKED force unblock from blocking operation,
+instance state changed (master -> replica?)
+```
+Воркер використовує `BLMOVE` — блокуючу команду Redis для очікування нових jobs.
+Redis автоматично запускав `BGSAVE` (snapshot на диск) за замовчуванням:
+- кожні 60 сек при 10 000+ змін ключів
+- кожні 300 сек при 100+ змінах
+Під час `BGSAVE` Redis тимчасово змінює internal state (fork + copy-on-write),
+що примусово розблоковувало `BLMOVE` з помилкою `master -> replica?`.
+RQ не обробляє цей виняток → воркер падав → Docker перезапускав контейнер.
+При рестарті `periodic.py` реєстрував нові jobs, але в одному з випадків
+(2026-03-23 11:02 → 16:15) jobs не зареєструвались — 5 годин без синхронізації.
+
+**Рішення:**
+1. Redis запускається з `--save "" --appendonly no` (у `docker-compose.yml`).
+   `BGSAVE` більше не відбувається, причина падінь усунена.
+2. `src/scheduler/watchdog.py` запускається через cron кожні 5 хв.
+   Перевіряє наявність `baf_polling` у scheduled registry.
+   Якщо job зник — викликає `setup_periodic_jobs()`.
+
+**Обґрунтування:**
+Redis в цьому проекті — виключно черга задач (ephemeral). Персистентність не потрібна:
+при рестарті Redis watchdog відновить jobs за ≤5 хв, а всі дані зберігаються в PostgreSQL.
+
+**Ризики та точки контролю:**
+- При рестарті Redis уся черга зникає → watchdog відновить за ≤5 хв (перевіряти `watchdog.log`)
+- Якщо watchdog сам не запускається (cron збій) → jobs зникнуть назавжди до ручного запуску
+  `docker compose exec hub python -m src.scheduler.periodic`
+- Якщо воркер впаде з іншої причини (не BGSAVE) → Docker перезапустить, `periodic.py` відновить jobs
+- Моніторинг: `/root/projects/onebox-integrations-hub/data/watchdog.log` — має оновлюватись кожні 5 хв
+- Моніторинг: бот → ⚙️ Технічний стан → Статус черги — має показувати `processing: 1` або нові `synced`
