@@ -140,6 +140,7 @@ def sync_customers():
                         source_updated_at=source_updated_at,
                         first_seen_at=now,
                         last_seen_at=now,
+                        loaded_at=now,
                     )
                     session.add(dim)
                 else:
