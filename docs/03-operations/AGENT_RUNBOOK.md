@@ -41,16 +41,46 @@ Audience: internal agents/operators
 
 ## Periodic jobs (RQ 2.x scheduler)
 
-Jobs are registered on worker startup via `src/scheduler/periodic.py`.
-If Redis is flushed or worker restarted — jobs are re-registered automatically (docker-compose command runs `periodic.py` before `rq worker`).
+### Як це працює
 
-| Job | Interval |
-|-----|----------|
-| `baf_polling.BafPollingWorker.run_polling` | 20 min |
-| `catalog_then_stock_sync.run_catalog_then_stock` | 4 hours |
-| `bot.digest.send_daily_digest` | daily 09:00 Kyiv |
+**RQ (Redis Queue)** — черга задач на базі Redis. Worker (`onebox-integrations-hub-worker-1`) постійно слухає чергу і виконує jobs.
 
-Manual re-register if needed:
+**RQ scheduler** (вбудований в RQ 2.x, запускається через `rq worker --with-scheduler`) — окремий thread всередині worker-процесу, який у потрібний момент переміщує заплановані jobs з `ScheduledJobRegistry` → в основну чергу → worker їх виконує.
+
+**Реєстрація jobs** відбувається через `src/scheduler/periodic.py`:
+- при старті воркера (docker-compose команда: `python -m src.scheduler.periodic && rq worker --with-scheduler default`)
+- або вручну: `docker compose exec hub python -m src.scheduler.periodic`
+
+**Важливо:** jobs зберігаються в Redis. Якщо Redis скинути (`redis-cli FLUSHALL`) або воркер перезапустити без `periodic.py` — jobs зникнуть і синхронізація зупиниться. `periodic.py` при кожному запуску спочатку скасовує старі jobs, потім реєструє нові (ідемпотентно).
+
+**Crontab для OneBox не використовується** — весь розклад через RQ worker. Глобальний crontab містить тільки certbot та інструменти моніторингу.
+
+### Розклад jobs
+
+| Job | Інтервал | Що робить |
+|-----|----------|-----------|
+| `baf_polling.BafPollingWorker.run_polling` | кожні **20 хв** | Poll BAF → ETL → refresh customers → sync pending → OneBox |
+| `catalog_then_stock_sync.run_catalog_then_stock` | кожні **4 год** | Оновлює каталог товарів (33k+ SKU) → залишки на складах |
+| `bot.digest.send_daily_digest` | щодня **09:00 Kyiv** | Telegram дайджест: продажі, синхронізація, статус |
+
+### Перевірити стан jobs
+
+```bash
+# Активні scheduled jobs
+docker compose exec hub python -c "
+from rq.job import Job; from src.core.queue import get_queue
+from datetime import datetime, timezone
+q = get_queue('default'); conn = q.connection
+for jid in q.scheduled_job_registry.get_job_ids():
+    j = Job.fetch(jid, connection=conn)
+    score = conn.zscore(q.scheduled_job_registry.key, jid)
+    t = datetime.fromtimestamp(float(score), tz=timezone.utc).strftime('%d.%m %H:%M UTC')
+    print(j.func_name.split('.')[-1], '->', t)
+"
+```
+
+### Примусова перереєстрація (якщо jobs зникли)
+
 ```bash
 docker compose exec hub python -m src.scheduler.periodic
 ```
