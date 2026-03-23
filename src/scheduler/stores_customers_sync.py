@@ -1,7 +1,7 @@
 import httpx
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, date
 from sqlmodel import Session, delete
 from src.core.database import engine
 from src.core.logger import get_logger
@@ -74,38 +74,90 @@ def sync_stores():
     except Exception as e:
         logger.error("sync_stores_failed", error=str(e))
 
+def parse_date(val: str | None) -> date | None:
+    """Parse DATE from BAF (YYYY-MM-DD or DD.MM.YYYY)."""
+    if not val:
+        return None
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(val, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def parse_datetime(val: str | None) -> datetime | None:
+    """Parse DATETIME from BAF (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD HH:MM:SS)."""
+    if not val:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(val, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def sync_customers():
     try:
         res = get_baf_data("customers")
         rows = res.get("rows", [])
         load_id = uuid.uuid4()
-        
+
         with Session(engine) as session:
             session.exec(delete(StgBafCustomer))
+
             for r in rows:
-                phone_normalized = normalize_phone_ua(r.get("customer_phone"))
+                phone_norm = normalize_phone_ua(r.get("customer_phone"))
+                birth_date = parse_date(r.get("birth_date"))
+                source_created_at = parse_date(r.get("source_created_at"))
+                source_updated_at = parse_datetime(r.get("source_updated_at"))
 
                 stg = StgBafCustomer(
                     load_id=load_id,
                     customer_uuid=r["customer_uuid"],
-                    customer_name=r["customer_name"],
-                    customer_phone=phone_normalized
+                    customer_name=r.get("customer_name"),
+                    customer_phone=phone_norm,
+                    birth_date=birth_date,
+                    source_created_at=source_created_at,
+                    source_updated_at=source_updated_at,
+                    ext_data={}
                 )
                 session.add(stg)
-                
+
+                now = datetime.utcnow()
                 dim = session.query(DimCustomer).filter_by(customer_uuid=stg.customer_uuid).first()
                 if not dim:
                     dim = DimCustomer(
                         customer_uuid=stg.customer_uuid,
                         customer_name=stg.customer_name,
-                        customer_phone=stg.customer_phone
+                        customer_phone=stg.customer_phone,
+                        customer_phone_norm=phone_norm,
+                        birth_date=birth_date,
+                        birth_month=birth_date.month if birth_date else None,
+                        birth_day=birth_date.day if birth_date else None,
+                        source_created_at=source_created_at,
+                        source_updated_at=source_updated_at,
+                        first_seen_at=now,
+                        last_seen_at=now,
                     )
                     session.add(dim)
                 else:
                     dim.customer_name = stg.customer_name
                     dim.customer_phone = stg.customer_phone
-                    dim.loaded_at = datetime.utcnow()
+                    dim.customer_phone_norm = phone_norm
+                    # Update birth_date only if we get a value (don't overwrite with None)
+                    if birth_date:
+                        dim.birth_date = birth_date
+                        dim.birth_month = birth_date.month
+                        dim.birth_day = birth_date.day
+                    dim.source_created_at = source_created_at
+                    dim.source_updated_at = source_updated_at
+                    dim.last_seen_at = now
+                    dim.updated_at = now
+
             session.commit()
+
         logger.info("sync_customers_done", count=len(rows))
     except Exception as e:
         logger.error("sync_customers_failed", error=str(e))

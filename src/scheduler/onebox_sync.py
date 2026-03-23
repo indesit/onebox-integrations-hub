@@ -71,6 +71,22 @@ class OneBoxSyncWorker:
             logger.info("onebox_sync_batch_start", unique_receipts=len(receipt_groups))
 
             for receipt_uuid, lines_data in receipt_groups.items():
+                # Skip if any line has qty < 0 (return receipt)
+                if any(f.qty < 0 for f, _, _, _ in lines_data):
+                    logger.info("onebox_sync_skip_return", receipt_uuid=str(receipt_uuid))
+                    for f, _, _, _ in lines_data:
+                        f.onebox_status = "ignored_return"
+                        f.updated_at = datetime.utcnow()
+                    continue
+                
+                # Skip if not personalized
+                if lines_data[0][0].customer_uuid is None:
+                    logger.info("onebox_sync_skip_anonymous", receipt_uuid=str(receipt_uuid))
+                    for f, _, _, _ in lines_data:
+                        f.onebox_status = "ignored_anonymous"
+                        f.updated_at = datetime.utcnow()
+                    continue
+
                 self._sync_single_receipt(session, receipt_uuid, lines_data)
 
             session.commit()
@@ -111,25 +127,44 @@ class OneBoxSyncWorker:
                 })
                 logger.info("onebox_sync_prep_product", receipt_uuid=str(receipt_uuid), articul=sku, name=full_name)
             
-            # Call API to create/update products and get their OneBox IDs
+            # Upsert all products in one batch request
             prod_response = self.client.set_products(product_upsert_payload)
             if prod_response.get("status") != 1:
                 raise ValueError(f"Failed to upsert products: {prod_response.get('errorArray')}")
-            
             onebox_product_ids = prod_response.get("dataArray", [])
             if len(onebox_product_ids) != len(product_upsert_payload):
-                raise ValueError("Mismatch in returned product IDs from OneBox")
+                raise ValueError(f"Product ID count mismatch: got {len(onebox_product_ids)}, expected {len(product_upsert_payload)}")
 
             # 1.1. Upsert Customer to OneBox (HUB-014)
             customer = lines_data[0][3]
             onebox_customer_id = None
             customer_first_name = ""
             customer_last_name = ""
+
+            # Anonymous sale (null UUID) — skip, no deal needed in OneBox
+            NULL_UUID = "00000000-0000-0000-0000-000000000000"
+            if str(facts[0].customer_uuid or "") == NULL_UUID:
+                for fact in facts:
+                    fact.onebox_status = "ignored_anonymous"
+                    fact.sync_error = None
+                    fact.updated_at = datetime.utcnow()
+                logger.info("onebox_sync_ignored_anonymous", receipt_uuid=str(receipt_uuid))
+                return
+
+            # If receipt has customer_uuid, but customer is missing in dim_customers,
+            # postpone sync and retry on next cycle.
+            if facts[0].customer_uuid is not None and (not customer or (not (customer.customer_phone or '').strip() and not (customer.customer_name or '').strip())):
+                for fact in facts:
+                    fact.onebox_status = "pending"
+                    fact.sync_error = "missing_customer_in_dim"
+                    fact.updated_at = datetime.utcnow()
+                logger.warning("onebox_sync_missing_customer_dim_retry", receipt_uuid=str(receipt_uuid), customer_uuid=str(facts[0].customer_uuid))
+                return
             
             if customer:
                 full_name = (customer.customer_name or "Невідомий клієнт").strip()
                 phone = (customer.customer_phone or "").strip()
-                
+
                 # Split Name: Assuming "Last First Middle" or "Last First"
                 name_parts = full_name.split()
                 if len(name_parts) >= 2:
@@ -139,14 +174,30 @@ class OneBoxSyncWorker:
                     customer_last_name = ""
                     customer_first_name = full_name
 
+                # STEP 0: Use cached onebox_contact_id if already known — skip API search
+                if customer.onebox_contact_id:
+                    onebox_customer_id = customer.onebox_contact_id
+                    logger.info("onebox_customer_from_cache", id=onebox_customer_id,
+                                customer_uuid=str(customer.customer_uuid))
+
                 # STEP 1: Search for existing contact by phone to avoid duplicates
-                if phone:
+                if not onebox_customer_id and phone:
                     # Search by phone often behaves inconsistently in API v2
                     # We will also try to search by namelast if we have it
-                    search_res = self.client.get_contacts({"filter": {"phone": phone}, "fields": ["id", "name", "namelast", "phones", "phone"]})
+                    clean_search_phone = phone.replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "").strip()
+                    # Also try search without 38
+                    short_phone = clean_search_phone[2:] if clean_search_phone.startswith("38") else clean_search_phone
+                    
+                    search_res = self.client.get_contacts({"filter": {"phones": [clean_search_phone]}, "fields": ["id", "name", "namelast", "phones", "phone"]})
                     
                     if search_res.get("status") == 1:
                         candidates = search_res.get("dataArray", []) or []
+                        
+                        # Try short phone if nothing found
+                        if not candidates:
+                            search_res_short = self.client.get_contacts({"filter": {"phones": [short_phone]}, "fields": ["id", "name", "namelast", "phones", "phone"]})
+                            if search_res_short.get("status") == 1:
+                                candidates = search_res_short.get("dataArray", []) or []
                         
                         # If search by phone returned nothing or trash, try by namelast + name
                         search_res_name = self.client.get_contacts({"filter": {"namelast": customer_last_name}, "fields": ["id", "name", "namelast", "phones", "phone"]})
@@ -159,7 +210,7 @@ class OneBoxSyncWorker:
                                      candidates.append(nc)
 
                         # Clean target phone
-                        clean_phone = phone.replace("+", "").strip()
+                        clean_phone = phone.replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "").strip()
 
                         # Sort candidates: prioritize those with non-empty phones or specific original ID if found
                         candidates.sort(key=lambda x: (len(x.get("phones", []) or []), str(x.get("id")) == "46741"), reverse=True)
@@ -176,8 +227,8 @@ class OneBoxSyncWorker:
                             if c_name == "restapi" or c_id == "1":
                                 continue
                             
-                            clean_c_phones = [p.replace("+", "").strip() for p in c_phones if p]
-                            clean_c_phone = c_phone.replace("+", "").strip()
+                            clean_c_phones = [p.replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "").strip() for p in c_phones if p]
+                            clean_c_phone = c_phone.replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "").strip()
 
                             # Match logic:
                             # 1. Exact phone match in the list of phones
@@ -194,18 +245,28 @@ class OneBoxSyncWorker:
 
                 # STEP 2: Only upsert/create if not found by phone
                 if not onebox_customer_id:
-                    customer_payload = [{
+                    customer_payload_item = {
                         "name": customer_first_name,
                         "namelast": customer_last_name,
-                        "phone": phone,
+                        "phones": [clean_search_phone] if phone else [],
+                        "phone": clean_search_phone if phone else "",
                         "externalid": f"baf_{customer.customer_uuid}",
-                        "findbyArray": ["externalid"] # Use externalid as secondary link
-                    }]
+                        "findbyArray": ["externalid", "phone"]
+                    }
+                    if customer.birth_date:
+                        customer_payload_item["bdate"] = customer.birth_date.strftime("%Y-%m-%d")
+                    customer_payload = [customer_payload_item]
                     cust_response = self.client.set_contacts(customer_payload)
                     if cust_response.get("status") != 1:
                         logger.warning("onebox_customer_upsert_failed", error=cust_response.get("errorArray"))
                     else:
                         onebox_customer_id = str(cust_response.get("dataArray", [None])[0])
+
+                # STEP 3: Cache onebox_contact_id in dim_customers for future calls
+                if onebox_customer_id and (not customer.onebox_contact_id):
+                    customer.onebox_contact_id = onebox_customer_id
+                    customer.onebox_synced_at = datetime.utcnow()
+                    session.add(customer)
 
             # 1.5. Prepare Client Phone and Store
             client_phone = customer.customer_phone if customer and customer.customer_phone else "+380000000000"
@@ -234,13 +295,16 @@ class OneBoxSyncWorker:
             clean_number = raw_number.split("-")[-1] if "-" in raw_number else raw_number
 
             for idx, (fact, variant, store, customer) in enumerate(lines_data):
+                # Using line_amount to account for discounts applied in BAF
+                actual_price = round(float(fact.line_amount) / float(fact.qty), 2) if fact.qty and float(fact.qty) != 0 else float(fact.price)
+                
                 order_products.append({
                     "productinfo": {
                         "id": str(onebox_product_ids[idx])
                     },
                     "count": fact.qty,
-                    "price": fact.price,
-                    "comment": f"BAF UUID: {fact.product_uuid}"
+                    "price": actual_price,
+                    "comment": f"BAF UUID: {fact.product_uuid} (base price: {fact.price})"
                 })
 
             # OneBox Order Payload (Anton's Workflow #9)
@@ -255,6 +319,29 @@ class OneBoxSyncWorker:
                 "customfields": {}
             }
             
+            # STEP 3: Deduplication by exact Name
+            # Since findbyArray: ["name"] doesn't work reliably for closed orders in OneBox API v2 (it creates duplicates),
+            # we must search manually. If it already exists, we just mark it as synced without pushing.
+            existing_order_id = None
+            search_order_res = self.client._post_with_retry("order/get/", {"filter": {"name": clean_number}, "fields": ["id", "name"]})
+            if search_order_res.get("status") == 1:
+                for o in search_order_res.get("dataArray", []):
+                    if o.get("name", "").strip() == clean_number:
+                        existing_order_id = str(o.get("id"))
+                        logger.info("onebox_order_found_existing", id=existing_order_id, name=clean_number)
+                        break
+            
+            if existing_order_id:
+                # If it exists, DO NOT call order/set/, just mark as synced
+                for fact in facts:
+                    fact.onebox_status = "synced"
+                    fact.onebox_order_id = existing_order_id
+                    fact.onebox_synced_at = datetime.utcnow()
+                    fact.sync_error = None
+                    fact.updated_at = datetime.utcnow()
+                logger.info("onebox_sync_skipped_already_exists", receipt_uuid=str(receipt_uuid), onebox_id=existing_order_id)
+                return
+
             # Link Customer (HUB-014)
             if onebox_customer_id:
                 # OneBox order link: Verified with support - use client.userid

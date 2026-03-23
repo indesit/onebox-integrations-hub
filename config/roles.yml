@@ -1,0 +1,17 @@
+# Roles and phone whitelist for Telegram bot
+# Phones in international format: +380XXXXXXXXX
+# Changes take effect immediately without container restart.
+#
+# Roles:
+#   owner — full access to all commands including /cash, /users
+#   admin — operational commands: /status, /failed, /customer, /fix_bdate, /digest
+#   user  — basic access (reserved for future commands like /mybalance)
+
+owner:
+  - "+380501960018"
+
+admin:
+  - "+380969697981"
+
+user: []
+  # - "+380XXXXXXXXX"  # продавець

@@ -37,7 +37,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    command: rq worker --with-scheduler default
+    command: >
+      sh -c "python -m src.scheduler.periodic && rq worker --with-scheduler default"
     env_file:
       - .env
     volumes:
@@ -47,6 +48,22 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      db:
+        condition: service_started
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: python -m src.bot.bot
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+      - ./src:/app/src
+    depends_on:
       db:
         condition: service_started
     restart: unless-stopped

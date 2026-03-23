@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, Dict, Any
 from uuid import UUID
 from sqlmodel import SQLModel, Field, Column, JSON
@@ -158,9 +158,29 @@ class DimCustomer(SQLModel, table=True):
     __tablename__ = "dim_customers"
     id: Optional[int] = Field(default=None, primary_key=True)
     customer_uuid: UUID = Field(index=True)
-    customer_name: str
+
+    customer_name: Optional[str] = None
     customer_phone: Optional[str] = None
-    loaded_at: datetime = Field(default_factory=datetime.utcnow)
+    customer_phone_norm: Optional[str] = Field(default=None, index=True)
+
+    birth_date: Optional[date] = None
+    birth_month: Optional[int] = None
+    birth_day: Optional[int] = None
+
+    onebox_contact_id: Optional[str] = Field(default=None, index=True)
+    onebox_synced_at: Optional[datetime] = None
+
+    is_active: bool = Field(default=True)
+
+    source_created_at: Optional[date] = None
+    source_updated_at: Optional[datetime] = None
+
+    ext_data: Optional[Any] = Field(default={}, sa_column=Column(JSONB))
+
+    first_seen_at: datetime = Field(default_factory=datetime.utcnow)
+    last_seen_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 class StgBafStore(SQLModel, table=True):
     __tablename__ = "stg_baf_stores"
@@ -178,9 +198,14 @@ class StgBafCustomer(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     load_id: UUID = Field(index=True)
     loaded_at: datetime = Field(default_factory=datetime.utcnow)
-    
+
     customer_uuid: UUID
-    customer_name: str
+    customer_name: Optional[str] = None
     customer_phone: Optional[str] = None
-    
+    birth_date: Optional[date] = None
+    source_created_at: Optional[date] = None
+    source_updated_at: Optional[datetime] = None
+
+    ext_data: Optional[Any] = Field(default={}, sa_column=Column(JSONB))
+
     source_system: str = Field(default="BAF")

@@ -50,6 +50,18 @@ class BafPollingWorker:
                 # 3. Process flat lines through BafAdapter (groups them internally)
                 receipt_ids = BafAdapter.process_flat_lines(lines)
                 logger.info("baf_polling_processed", receipt_count=len(receipt_ids))
+                
+            # 4. Refresh customers before OneBox sync (new clients may be created right before receipt posting)
+            from src.scheduler.stores_customers_sync import sync_customers
+            logger.info("baf_polling_triggering_customers_sync")
+            sync_customers()
+
+            # 5. Trigger OneBox sync for newly pulled receipts
+            from src.scheduler.onebox_sync import OneBoxSyncWorker
+            logger.info("baf_polling_triggering_onebox_sync")
+            worker = OneBoxSyncWorker()
+            worker.run_sync_batch(limit=200)
+            logger.info("baf_polling_onebox_sync_done")
             
         except Exception as e:
             logger.error("baf_polling_failed", error=str(e))

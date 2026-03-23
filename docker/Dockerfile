@@ -26,7 +26,8 @@ RUN pip install --no-cache-dir \
         "alembic>=1.13.0" \
         "pyyaml>=6.0.1" \
         "jinja2>=3.1.3" \
-        "python-multipart>=0.0.9"
+        "python-multipart>=0.0.9" \
+        "aiogram>=3.4.0"
 
 # ── Copy application source ────────────────────────────────────────────────
 COPY src/ ./src/
