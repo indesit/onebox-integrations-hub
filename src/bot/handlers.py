@@ -293,7 +293,7 @@ def cmd_sales(period: str = "yesterday") -> str:
             FROM fact_sales_receipt_items f
             LEFT JOIN dim_stores s ON s.store_uuid = f.store_uuid
             WHERE DATE(f.receipt_datetime) = '{target}'
-              AND f.onebox_status NOT IN ('ignored_return', 'ignored_anonymous')
+              AND f.onebox_status != 'ignored_return'
             GROUP BY s.store_name
             ORDER BY revenue DESC NULLS LAST
         """)).all()
@@ -304,7 +304,7 @@ def cmd_sales(period: str = "yesterday") -> str:
                 SUM(line_amount)
             FROM fact_sales_receipt_items
             WHERE DATE(receipt_datetime) = '{target}'
-              AND onebox_status NOT IN ('ignored_return', 'ignored_anonymous')
+              AND onebox_status != 'ignored_return'
         """)).first()
 
     if not rows:
