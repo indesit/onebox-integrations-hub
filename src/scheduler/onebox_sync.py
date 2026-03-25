@@ -127,11 +127,25 @@ class OneBoxSyncWorker:
                 })
                 logger.info("onebox_sync_prep_product", receipt_uuid=str(receipt_uuid), articul=sku, name=full_name)
             
-            # Upsert all products in one batch request
-            prod_response = self.client.set_products(product_upsert_payload)
-            if prod_response.get("status") != 1:
-                raise ValueError(f"Failed to upsert products: {prod_response.get('errorArray')}")
-            onebox_product_ids = prod_response.get("dataArray", [])
+            # Get-or-create products in OneBox.
+            # product/set/ only creates NEW products — returns 400 for existing ones.
+            # So we first try product/get/ by articul, only create if not found.
+            onebox_product_ids = []
+            for prod in product_upsert_payload:
+                sku = prod["articul"]
+                get_resp = self.client._post_with_retry("product/get/", {"filter": {"articul": sku}, "fields": ["id", "articul"]})
+                if get_resp.get("status") == 1 and get_resp.get("dataArray"):
+                    existing_id = get_resp["dataArray"][0].get("id")
+                    logger.info("onebox_product_found_existing", articul=sku, id=existing_id)
+                    onebox_product_ids.append(existing_id)
+                else:
+                    create_resp = self.client.set_products([prod])
+                    if create_resp.get("status") != 1:
+                        raise ValueError(f"Failed to upsert products: {create_resp.get('errorArray')}")
+                    new_id = create_resp.get("dataArray", [None])[0]
+                    logger.info("onebox_product_created", articul=sku, id=new_id)
+                    onebox_product_ids.append(new_id)
+
             if len(onebox_product_ids) != len(product_upsert_payload):
                 raise ValueError(f"Product ID count mismatch: got {len(onebox_product_ids)}, expected {len(product_upsert_payload)}")
 
